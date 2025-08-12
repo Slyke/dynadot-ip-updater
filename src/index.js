@@ -33,9 +33,16 @@ const fetchExistingRecords = async (domain, correlationId) => {
     throw new Error(`Failed to fetch records. Status: ${response.status}`);
   }
   const data = await response.json();
+  
+  const ns =
+    data?.GetDnsResponse?.GetDns?.NameServerSettings ??
+    data?.Response?.GetDns?.NameServerSettings ??
+    data?.GetDns?.NameServerSettings ??
+    {};
+
   return {
-    topDomain: Array.from(new Set(data.GetDnsResponse.GetDns.NameServerSettings.MainDomains.map(JSON.stringify))).map(JSON.parse),
-    subDomains: Array.from(new Set(data.GetDnsResponse.GetDns.NameServerSettings.SubDomains.map(JSON.stringify))).map(JSON.parse)
+    topDomain: Array.from(new Set((ns.MainDomains || []).map(JSON.stringify))).map(JSON.parse),
+    subDomains: Array.from(new Set((ns.SubDomains || []).map(JSON.stringify))).map(JSON.parse)
   };
 };
 
@@ -73,7 +80,17 @@ const getPublicIP = async () => {
     logWithTimestamp(`{${correlationId}} Manual IP: ${MANUAL_IP ? MANUAL_IP : 'No'}`);
 
     const domain = DYNADOT_UPDT_DOMAINS;
-    const records = await fetchExistingRecords(domain, correlationId);
+    let records = { topDomain: [], subDomains: [] };
+    try {
+      records = await fetchExistingRecords(domain, correlationId);
+    } catch (err) {
+      logWithTimestamp(`{${correlationId}} Error fetching existing records: ${err.message}`);
+    }
+
+    if (!records.topDomain.length && !records.subDomains.length) {
+      logWithTimestamp(`{${correlationId}} Dynadot returned empty; proceeding may wipe zone. topDomainLength: ${records?.topDomain?.length ?? -1}, subDomainsLength: ${records?.subDomains?.length ?? -1}`);
+    }
+
     logWithTimestamp(`{${correlationId}} Current Records: ${JSON.stringify(records)}`);
 
     const mainRecordIndex = records.topDomain.findIndex(
