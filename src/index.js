@@ -1,3 +1,4 @@
+
 // Dynadot DNS-01 Challenge IP Updater
 import https from 'https';
 import { URL } from 'url';
@@ -29,11 +30,9 @@ const fetchExistingRecords = async (domain, correlationId) => {
   if (LOG_API_URL) logWithTimestamp(`{${correlationId}} Fetching records from: ${url.replace(DYNADOT_API_KEY, '***')}`);
 
   const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch records. Status: ${response.status}`);
-  }
+  if (!response.ok) throw new Error(`Failed to fetch records. Status: ${response.status}`);
+
   const data = await response.json();
-  
   const ns =
     data?.GetDnsResponse?.GetDns?.NameServerSettings ??
     data?.Response?.GetDns?.NameServerSettings ??
@@ -41,29 +40,77 @@ const fetchExistingRecords = async (domain, correlationId) => {
     {};
 
   return {
-    topDomain: Array.from(new Set((ns.MainDomains || []).map(JSON.stringify))).map(JSON.parse),
-    subDomains: Array.from(new Set((ns.SubDomains || []).map(JSON.stringify))).map(JSON.parse)
+    topDomain: Array.from(new Set((ns.MainDomains || []).map((r) => JSON.stringify(r)))).map((r) => JSON.parse(r)),
+    subDomains: Array.from(new Set((ns.SubDomains || []).map((r) => JSON.stringify(r)))).map((r) => JSON.parse(r))
   };
 };
 
 const makeRequest = async (url, correlationId) => {
   if (LOG_API_URL) logWithTimestamp(`{${correlationId}} Making request to: ${url.replace(DYNADOT_API_KEY, '***')}`);
-
   const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`HTTP error! Status: ${response.status}`);
-  }
-
+  if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
   return response.text();
 };
 
 const getPublicIP = async () => {
   if (MANUAL_IP) return MANUAL_IP;
   const response = await fetch('https://api.ipify.org');
-  if (!response.ok) {
-    throw new Error('Failed to fetch public IP');
-  }
+  if (!response.ok) throw new Error('Failed to fetch public IP');
   return response.text();
+};
+
+const collectSubdomainEnv = (ip, correlationId) => {
+  const subdomains = [];
+  let index = 0;
+
+  while (true) {
+    const name = process.env[`SUBDOMAIN${index}`];
+
+    if (index === 0 && !name) {
+      subdomains.push({ Subhost: SUBDOMAIN0, RecordType: (process.env[`SUBDOMAIN${index}_TYPE`] || 'A').toUpperCase(), Value: process.env[`SUBDOMAIN${index}_VALUE`] || ip });
+      logWithTimestamp(`{${correlationId}} SUBDOMAIN0 defaulted to: ${SUBDOMAIN0}`);
+      index++;
+      continue;
+    }
+
+    if (!name) break;
+
+    const type = (process.env[`SUBDOMAIN${index}_TYPE`] || 'A').toUpperCase();
+    const value = process.env[`SUBDOMAIN${index}_VALUE`] || ip;
+
+    subdomains.push({ Subhost: name, RecordType: type, Value: value });
+    logWithTimestamp(`{${correlationId}} Loaded SUBDOMAIN${index}: ${name} ${type} ${value}`);
+    index++;
+  }
+
+  return subdomains;
+};
+
+const diffSubdomains = (oldList, newList, correlationId) => {
+  const oldByKey = new Map(oldList.map((r) => [`${r.Subhost}|${r.RecordType}`, r]));
+  const newByKey = new Map(newList.map((r) => [`${r.Subhost}|${r.RecordType}`, r]));
+
+  const added = [];
+  const removed = [];
+  const changed = [];
+
+  for (const [key, newRec] of newByKey.entries()) {
+    if (!oldByKey.has(key)) added.push(newRec);
+    else if (oldByKey.get(key).Value !== newRec.Value) changed.push({ from: oldByKey.get(key), to: newRec });
+  }
+
+  for (const [key, oldRec] of oldByKey.entries()) {
+    if (!newByKey.has(key)) removed.push(oldRec);
+  }
+
+  if (!added.length && !removed.length && !changed.length) {
+    logWithTimestamp(`{${correlationId}} Diff: no subdomain changes`);
+    return;
+  }
+
+  added.forEach((r) => logWithTimestamp(`{${correlationId}} Added: ${r.Subhost} ${r.RecordType} ${r.Value}`));
+  removed.forEach((r) => logWithTimestamp(`{${correlationId}} Removed: ${r.Subhost} ${r.RecordType} ${r.Value}`));
+  changed.forEach((c) => logWithTimestamp(`{${correlationId}} Changed: ${c.from.Subhost} ${c.from.RecordType} ${c.from.Value} → ${c.to.Value}`));
 };
 
 (async () => {
@@ -76,31 +123,27 @@ const getPublicIP = async () => {
     const ip = await getPublicIP();
     logWithTimestamp(`{${correlationId}} Current IP: ${ip}`);
     logWithTimestamp(`{${correlationId}} Domain: ${DYNADOT_UPDT_DOMAINS}`);
-    logWithTimestamp(`{${correlationId}} Subdomain0: ${SUBDOMAIN0}`);
     logWithTimestamp(`{${correlationId}} Manual IP: ${MANUAL_IP ? MANUAL_IP : 'No'}`);
 
     const domain = DYNADOT_UPDT_DOMAINS;
     let records = { topDomain: [], subDomains: [] };
+
     try {
       records = await fetchExistingRecords(domain, correlationId);
     } catch (err) {
       logWithTimestamp(`{${correlationId}} Error fetching existing records: ${err.message}`);
     }
 
-    if (!records.topDomain.length && !records.subDomains.length) {
-      logWithTimestamp(`{${correlationId}} Dynadot returned empty; proceeding may wipe zone. topDomainLength: ${records?.topDomain?.length ?? -1}, subDomainsLength: ${records?.subDomains?.length ?? -1}`);
-    }
-
-    logWithTimestamp(`{${correlationId}} Current Records: ${JSON.stringify(records)}`);
-
-    const mainRecordIndex = records.topDomain.findIndex(
-      (record) => record.RecordType.toLowerCase() === 'a'
-    );
+    const mainRecordIndex = records.topDomain.findIndex((record) => record.RecordType.toLowerCase() === 'a');
     if (mainRecordIndex !== -1) {
       records.topDomain[mainRecordIndex].Value = ip;
     } else {
       records.topDomain.push({ RecordType: 'A', Value: ip });
     }
+
+    const newSubdomains = collectSubdomainEnv(ip, correlationId);
+    diffSubdomains(records.subDomains, newSubdomains, correlationId);
+    records.subDomains = newSubdomains;
 
     const apiUrl = new URL('https://api.dynadot.com/api3.json');
     apiUrl.searchParams.append('key', DYNADOT_API_KEY);
@@ -119,7 +162,6 @@ const getPublicIP = async () => {
     });
 
     const response = await makeRequest(apiUrl.toString(), correlationId);
-
     logWithTimestamp(`{${correlationId}} DNS update response: ${response}`);
   } catch (error) {
     logWithTimestamp(`{${correlationId}} Error: ${error.message}`);
