@@ -1,5 +1,5 @@
 
-// Dynadot DNS-01 Challenge IP Updater
+// Dynadot IP Updater
 import https from 'https';
 import { URL } from 'url';
 import { readFile } from 'fs/promises';
@@ -17,6 +17,7 @@ const DYNADOT_API_KEY = process.env.DYNADOT_API_KEY || 'your-dynadot-api-key';
 const DYNADOT_UPDT_DOMAINS = process.env.DYNADOT_UPDT_DOMAINS || 'example.com';
 const SUBDOMAIN0 = process.env.SUBDOMAIN0 || 'www';
 const MANUAL_IP = process.env.MANUAL_IP || '';
+const MERGE_ENTRIES = process.env.MERGE_ENTRIES === 'true';
 const LOG_VERBOSE = process.env.LOG_VERBOSE === 'true';
 const LOG_API_URL = process.env.LOG_API_URL === 'true';
 
@@ -143,7 +144,35 @@ const diffSubdomains = (oldList, newList, correlationId) => {
 
     const newSubdomains = collectSubdomainEnv(ip, correlationId);
     diffSubdomains(records.subDomains, newSubdomains, correlationId);
-    records.subDomains = newSubdomains;
+    if (!MERGE_ENTRIES) {
+      logWithTimestamp(`{${correlationId}} Mode: REBUILD (overwriting all subdomains)`);
+      records.subDomains = newSubdomains;
+    } else {
+      logWithTimestamp(`{${correlationId}} Mode: MERGE (preserving existing non-A records)`);
+
+      const preserved = records.subDomains.filter(r => {
+        const type = r.RecordType.toUpperCase();
+
+        return !['A', 'AAAA'].includes(type);
+      });
+
+      const managedKeys = new Set(
+        newSubdomains.map(r => `${r.Subhost}|${r.RecordType.toUpperCase()}`)
+      );
+
+      const preservedManagedSafe = records.subDomains.filter(r => {
+        const key = `${r.Subhost}|${r.RecordType.toUpperCase()}`;
+        return ['A', 'AAAA'].includes(r.RecordType.toUpperCase()) && !managedKeys.has(key);
+      });
+
+      records.subDomains = [
+        ...newSubdomains,
+        ...preserved,
+        ...preservedManagedSafe
+      ];
+
+      logWithTimestamp(`{${correlationId}} Preserved ${preserved.length + preservedManagedSafe.length} existing records`);
+    }
 
     const apiUrl = new URL('https://api.dynadot.com/api3.json');
     apiUrl.searchParams.append('key', DYNADOT_API_KEY);

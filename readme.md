@@ -26,6 +26,7 @@ Set the following environment variables before running the script:
 | `MANUAL_IP`            | Optional manual IP to use instead of public IP detection                    |
 | `LOG_VERBOSE`          | Set to `true` to enable verbose logging                                     |
 | `LOG_API_URL`          | Set to `true` to log full API request URLs (API key will be masked)         |
+| `MERGE_ENTRIES`        | Merge existing DNS records instead of overwriting entire zone (`true` = merge, `false` = rebuild) |
 
 ## Usage
 
